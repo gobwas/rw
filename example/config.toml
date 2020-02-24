@@ -1,0 +1,13 @@
+[review]
+mode = "diff"
+comments = true
+
+command = "vimdiff"
+parameters = [
+  "-c", "set background=dark",
+  "{{ .Head }}",
+  "{{ .Base }}",
+]
+
+[github]
+token="here your personal token from github"
