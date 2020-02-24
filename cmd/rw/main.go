@@ -83,7 +83,7 @@ func main() {
 	r := setupReview()
 	r.Provider = client
 	if err := r.Start(ctx); err != nil {
-		fmt.Printf("review failed: %v\n", err)
+		fmt.Printf("review failed: %v", err)
 		os.Exit(1)
 	}
 }

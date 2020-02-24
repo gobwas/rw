@@ -32,7 +32,6 @@ type Review interface {
 	BaseName() string
 	HeadName() string
 
-	// TODO: differentiate base and head lines.
 	Edit(ctx context.Context, file string, cmd ed.Command) error
 
 	Close() error

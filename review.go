@@ -14,7 +14,6 @@ import (
 	"os"
 	"os/exec"
 	"path"
-	"path/filepath"
 	"sort"
 	"strings"
 	"text/template"
@@ -40,8 +39,7 @@ var (
 	DefaultCommand    = "vimdiff"
 	DefaultParameters Parameters
 
-	DefaultMode    = ModeQuick
-	DefaultContext = 3
+	DefaultMode = ModeDiff
 )
 
 func init() {
@@ -131,9 +129,6 @@ type Review struct {
 	Preview  bool
 	Comments bool
 
-	ContextBefore int
-	ContextAfter  int
-
 	Command    string
 	Parameters Parameters
 }
@@ -143,14 +138,6 @@ func SetupReview(fs *flag.FlagSet) func() *Review {
 	fs.Var(&r.Mode,
 		"mode",
 		"review mode",
-	)
-	fs.IntVar(&r.ContextBefore,
-		"before", DefaultContext,
-		"context to add before changed line(s) for quick mode",
-	)
-	fs.IntVar(&r.ContextAfter,
-		"after", DefaultContext,
-		"context to add after changed line(s) for quick mode",
 	)
 	fs.BoolVar(&r.Preview,
 		"preview", false,
@@ -177,19 +164,6 @@ func SetupReview(fs *flag.FlagSet) func() *Review {
 		}
 		return &r
 	}
-}
-
-func (r *Review) contextBefore() int {
-	if n := r.ContextBefore; n > 0 {
-		return n
-	}
-	return DefaultContext
-}
-func (r *Review) contextAfter() int {
-	if n := r.ContextAfter; n > 0 {
-		return n
-	}
-	return DefaultContext
 }
 
 // root must exist.
@@ -324,166 +298,64 @@ func (r *Review) reviewQuick(ctx context.Context, review vcs.Review) (err error)
 		if err != nil {
 			return err
 		}
+		base := rwioutil.LineSeeker{Source: roBase}
+		//head := rwioutil.LineSeeker{Source: roHead}
 
-		var edits []ed.Command
 		err = diff(ctx, roBase.Name(), roHead.Name(), func(cmd ed.Command) {
-			edits = appendEdit(edits, cmd)
+			pos := cmd.Start - 3
+			if pos < 0 {
+				pos = 0
+			}
+			if err := base.SeekLine(pos - 1); err != nil {
+				panic(err)
+			}
+			// TODO: calculate maximum number of digits in line to not use that
+			// ` % 4d` for line formatting.
+			for ; pos != cmd.Start; pos++ {
+				line, err := base.ReadLine()
+				if err != nil {
+					panic(err)
+				}
+				fmt.Fprintf(os.Stdout, "  % 4d %s\n", pos, line)
+			}
+			switch cmd.Mode {
+			case ed.ModeAdd, ed.ModeChange:
+				for {
+					line, err := cmd.Text.ReadBytes('\n')
+					if err != nil {
+						break
+					}
+					color.Fprintf(os.Stdout, color.Green, "+ % 4d %s\n", pos, line)
+				}
+
+			case ed.ModeDelete:
+				for ; pos <= cmd.End; pos++ {
+					line, err := base.ReadLine()
+					if err != nil {
+						panic(err)
+					}
+					color.Fprintf(os.Stdout, color.Red, "- % 4d %s\n", pos, line)
+				}
+			}
+			for ; pos != cmd.End+3; pos++ {
+				line, err := base.ReadLine()
+				if err != nil {
+					break
+				}
+				fmt.Fprintf(os.Stdout, "  % 4d %s\n", pos, line)
+			}
+
+			fmt.Printf("%+v\n", cmd)
 		})
 		if err != nil {
 			return err
 		}
 
-		q := newQuick(roBase)
-		q.Render(edits)
-
-		for {
-			color.Fprintf(os.Stdout, color.White, "index %s..%s\n",
-				shortenRef(review.BaseName()),
-				shortenRef(review.HeadName()),
-			)
-			color.Fprintf(os.Stdout, color.White, "--- %s\n",
-				filepath.Join("a", file),
-			)
-			color.Fprintf(os.Stdout, color.White, "+++ %s\n",
-				filepath.Join("b", file),
-			)
-
-			b := q.Front()
-			for b != nil {
-				var (
-					lo = b
-					hi = b
-				)
-				for prev, next := b, q.Next(b); next != nil && baseDistance(prev, next) <= r.contextAfter(); {
-					hi = next
-					prev = next
-					next = q.Next(prev)
-				}
-			join:
-				var (
-					buffers     []io.WriterTo
-					baseLines   int
-					headLines   int
-					staticLines int
-				)
-				for prev, curr := (*editBuffer)(nil), lo; curr != nil; prev, curr = curr, q.Next(curr) {
-					baseLines += curr.baseLines
-					headLines += curr.headLines
-
-					if prev != nil {
-						var buf bytes.Buffer
-						staticLines += q.ExpandBetween(&buf, prev, curr)
-						buffers = append(buffers, buffer(buf.Bytes()))
-					}
-					buffers = append(buffers, curr)
-
-					if curr == hi {
-						break
-					}
-				}
-				var (
-					before bytes.Buffer
-					after  bytes.Buffer
-
-					contextBefore = r.contextBefore()
-					contextAfter  = r.contextAfter()
-				)
-			expand:
-				var (
-					beforeLines = q.ExpandBefore(&before, lo, contextBefore)
-					afterLines  = q.ExpandAfter(&after, hi, contextAfter)
-					expandLines = beforeLines + afterLines
-				)
-				fmt.Fprintf(os.Stdout, "@@ -%d,%d +%d,%d:\n",
-					lo.baseStart-beforeLines, baseLines+staticLines+expandLines,
-					lo.headStart-beforeLines, headLines+staticLines+expandLines,
-				)
-
-				before.WriteTo(os.Stdout)
-				for _, b := range buffers {
-					b.WriteTo(os.Stdout)
-				}
-				after.WriteTo(os.Stdout)
-
-				quiz := prompt.QuizPairs(
-					"p", "Previous hunk",
-					"n", "Next hunk",
-					"q", "Quit immediately",
-					"c", "Comment changes",
-					"C", "Comment changes on specific line",
-					"b", "Expand context before hunk",
-					"a", "Expand context after hunk",
-				)
-				if q.HasLinesBefore(lo, beforeLines) {
-					quiz = append(quiz, prompt.QuizPairs()...)
-				}
-				i, err := prompt.QuizSingle(ctx, "What to do with this hunk", quiz)
-				if err != nil {
-					return err
-				}
-				switch quiz[i].Char {
-				case 'C':
-					for {
-						line, err := prompt.ReadLine(ctx, "What line(s) to comment: ")
-						if err != nil {
-							return err
-						}
-						lo, hi, err := parseLineRange(line)
-						if err != nil {
-							fmt.Printf("Bad input: %v\n", err)
-							continue
-						}
-						line, err = prompt.ReadLine(ctx, "What comment: ")
-						if err != nil {
-							return err
-						}
-						fmt.Println(lo, hi, line)
-						break
-					}
-					b = q.Next(hi)
-
-				case 'b':
-					if !q.HasLinesBefore(lo, beforeLines) {
-						if p := q.Prev(lo); p != nil {
-							lo = p
-							goto join
-						}
-					} else {
-						contextBefore += 5
-					}
-					goto expand
-
-				case 'a':
-					if !q.HasLinesAfter(hi, afterLines) {
-						if n := q.Next(hi); n != nil {
-							hi = n
-							goto join
-						}
-					} else {
-						contextAfter += 5
-					}
-					goto expand
-
-				case 'p':
-					prev := q.Prev(lo)
-					if prev != nil {
-						fmt.Println("prev ok")
-						b = prev
-					}
-				case 'n':
-					next := q.Next(hi)
-					if next != nil {
-						b = next
-					}
-				case 'q':
-					return nil
-				}
-				// Pad with context lines up to nextLine here.
-				//b = q.Next(hi)
-			}
-			break
+		resp, err := prompt.ReadLine(ctx, color.Sprintf(color.Blue, "What's next [a,b,c,d]? "))
+		if err != nil {
+			return err
 		}
-
+		fmt.Println(resp)
 	}
 
 	return nil
@@ -688,11 +560,21 @@ func (r *Review) reviewDiff(ctx context.Context, review vcs.Review) error {
 		// after single comments block. In that case will be produced two edits
 		// with same line range. For now its okay, but maybe it might be glued.
 		var edits []ed.Command
+		storeEdit := func(cmd ed.Command) {
+			log.Println("storing edit", cmd.Mode, cmd.Start, cmd.End)
+			log.Println(cmd.Text.String())
+			if cmd.Text != nil {
+				var buf bytes.Buffer
+				buf.ReadFrom(cmd.Text)
+				cmd.Text = &buf
+			}
+			edits = append(edits, cmd)
+		}
 		err = diff(ctx, roHead.Name(), rwHead.Name(), func(cmd ed.Command) {
 			if comments != nil {
-				applyEdit(comments, cmd, appendEditFunc(&edits))
+				applyEdit(comments, cmd, storeEdit)
 			} else {
-				edits = appendEdit(edits, cmd)
+				storeEdit(cmd)
 			}
 		})
 		if err != nil {
@@ -1068,43 +950,4 @@ func launch(ctx context.Context, name string, args ...string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
-}
-
-func appendEditFunc(edits *[]ed.Command) func(ed.Command) {
-	return func(cmd ed.Command) {
-		*edits = appendEdit(*edits, cmd)
-	}
-}
-
-func appendEdit(edits []ed.Command, cmd ed.Command) []ed.Command {
-	log.Println("storing edit", cmd.Mode, cmd.Start, cmd.End)
-	log.Println(cmd.Text.String())
-	if cmd.Text != nil {
-		var buf bytes.Buffer
-		buf.ReadFrom(cmd.Text)
-		cmd.Text = &buf
-	}
-	return append(edits, cmd)
-}
-
-func shortenRef(s string) string {
-	if !isHash(s) || len(s) < 7 {
-		return s
-	}
-	return s[:7]
-}
-
-func isHash(s string) bool {
-	const toLower = 'a' - 'A'
-	for i := 0; i < len(s); i++ {
-		c := s[i] | toLower
-		if 'a' <= c && c <= 'z' {
-			continue
-		}
-		if '0' <= c && c <= '9' {
-			continue
-		}
-		return false
-	}
-	return true
 }

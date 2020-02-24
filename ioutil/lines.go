@@ -39,7 +39,6 @@ func (s *LineSeeker) Read(p []byte) (int, error) {
 	return s.br.Read(p)
 }
 
-// ReadLine either returns a non-nil line or it returns an error, never both.
 func (s *LineSeeker) ReadLine() (line []byte, err error) {
 	line, s.buf, err = ReadLine(s.br, s.buf[:0])
 	return line, err

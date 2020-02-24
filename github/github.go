@@ -407,7 +407,6 @@ func (p *PullRequest) comment(ctx context.Context, file string, c ed.Command) (e
 		return nil
 	}
 
-	// FIXME: move this logic outside of github concrete impl.
 	switch body[0] {
 	case '+':
 		body = fmt.Sprintf(
