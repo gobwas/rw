@@ -15,7 +15,7 @@ import (
 	"github.com/gobwas/rw/ed"
 	"github.com/gobwas/rw/git"
 	"github.com/gobwas/rw/vcs"
-	"github.com/google/go-github/v37/github"
+	"github.com/google/go-github/v29/github"
 	"golang.org/x/oauth2"
 )
 
@@ -354,11 +354,11 @@ func (p *PullRequest) Checkout(ctx context.Context) (_ func() error, err error) 
 func (p *PullRequest) Edit(ctx context.Context, file string, c ed.Command) (err error) {
 	log.Printf("editing file %s", file)
 	switch c.Mode {
-	case ed.ModeDelete:
+	case ed.Delete:
 		return p.delete(ctx, file, c)
-	case ed.ModeChange:
+	case ed.Change:
 		return p.change(ctx, file, c)
-	case ed.ModeAdd:
+	case ed.Add:
 		return p.comment(ctx, file, c)
 	}
 	return nil
@@ -428,13 +428,11 @@ func (p *PullRequest) comment(ctx context.Context, file string, c ed.Command) (e
 		log.Printf("warning: incorrect parent comment id: %q: %v", num, err)
 	}
 
-	start := c.Start
-
 	_, _, err = p.c.client.PullRequests.CreateComment(ctx, p.c.owner, p.c.repo, *p.pr.Number, &github.PullRequestComment{
 		CommitID: p.pr.Head.SHA,
 		Body:     &body,
 		Path:     &file,
-		Line:     &start,
+		Line:     &c.Start,
 		Side:     &right,
 	})
 	return err
@@ -467,7 +465,7 @@ func (qs *qualifiers) String() string {
 }
 
 type issue struct {
-	issue    *github.Issue
+	issue    github.Issue
 	template *template.Template
 }
 

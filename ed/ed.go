@@ -6,30 +6,15 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-
-	"github.com/gobwas/rw/ioutil"
 )
 
 type Mode uint8
 
 const (
-	ModeAdd Mode = iota + 1
-	ModeChange
-	ModeDelete
+	Add Mode = iota + 1
+	Change
+	Delete
 )
-
-func (m Mode) String() string {
-	switch m {
-	case ModeAdd:
-		return "add"
-	case ModeChange:
-		return "change"
-	case ModeDelete:
-		return "delete"
-	default:
-		return "???"
-	}
-}
 
 type Command struct {
 	Start int
@@ -40,10 +25,6 @@ type Command struct {
 
 var zeroCommand Command
 
-// Diff parses diff provided by r and sequentially calls fn with each found
-// command in a way that given command internals (e.g. Command.Text) are only
-// valid until fn returns. That is, it's a caller responsibility to copy
-// command text if needed.
 func Diff(r io.Reader, fn func(Command)) (err error) {
 	var (
 		rb = bufio.NewReader(r)
@@ -52,13 +33,10 @@ func Diff(r io.Reader, fn func(Command)) (err error) {
 		buf  []byte
 
 		cmd Command
-
-		// out is a temporal buffer we use for each found command.
-		// It is needed since we can have multiline commands.
 		out bytes.Buffer
 	)
 	for {
-		line, buf, err = ioutil.ReadLine(rb, buf[:0])
+		line, buf, err = readLine(rb, buf[:0])
 		if err != nil {
 			if err == io.EOF {
 				err = nil
@@ -70,7 +48,7 @@ func Diff(r io.Reader, fn func(Command)) (err error) {
 			if err != nil {
 				return err
 			}
-			if cmd.Mode == ModeDelete {
+			if cmd.Mode == Delete {
 				fn(cmd)
 				cmd = zeroCommand
 			} else {
@@ -86,6 +64,23 @@ func Diff(r io.Reader, fn func(Command)) (err error) {
 		}
 		out.Write(line)
 		out.WriteByte('\n')
+	}
+	return nil
+}
+
+func readLine(r *bufio.Reader, buf []byte) (_, line []byte, err error) {
+	for {
+		line, isPrefix, err := r.ReadLine()
+		if err != nil {
+			return nil, buf, err
+		}
+		if isPrefix || len(buf) > 0 {
+			buf = append(buf, line...)
+			line = buf
+		}
+		if !isPrefix {
+			return line, buf, nil
+		}
 	}
 }
 
@@ -155,11 +150,11 @@ func (c *commandParser) command() commandState {
 	char := c.next()
 	switch char {
 	case 'a':
-		c.Command.Mode = ModeAdd
+		c.Command.Mode = Add
 	case 'c':
-		c.Command.Mode = ModeChange
+		c.Command.Mode = Change
 	case 'd':
-		c.Command.Mode = ModeDelete
+		c.Command.Mode = Delete
 	default:
 		c.fatalf("unexpected command type: %q", string(char))
 	}

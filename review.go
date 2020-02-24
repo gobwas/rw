@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/gobwas/prompt"
-	"github.com/gobwas/rw/color"
 	"github.com/gobwas/rw/ed"
 	rwioutil "github.com/gobwas/rw/ioutil"
 	"github.com/gobwas/rw/vcs"
@@ -30,7 +29,6 @@ type Mode uint
 
 const (
 	ModeUnknown Mode = iota
-	ModeQuick
 	ModeDiff
 	ModeCheckout
 )
@@ -45,8 +43,8 @@ var (
 func init() {
 	for _, arg := range []string{
 		"--clean",
-		"{{ .Head }}",
-		"{{ .Base }}",
+		"{{.Head}}",
+		"{{.Base}}",
 	} {
 		if err := DefaultParameters.Set(arg); err != nil {
 			panic(err)
@@ -98,8 +96,6 @@ func buildArgs(ps Parameters, r reviewInfo) ([]string, error) {
 
 func (m *Mode) Set(s string) error {
 	switch s {
-	case "quick":
-		*m = ModeQuick
 	case "diff":
 		*m = ModeDiff
 	case "checkout":
@@ -112,8 +108,6 @@ func (m *Mode) Set(s string) error {
 
 func (m Mode) String() string {
 	switch m {
-	case ModeQuick:
-		return "quick"
 	case ModeDiff:
 		return "diff"
 	case ModeCheckout:
@@ -204,43 +198,38 @@ func (r *temp) init() {
 	r.path, r.err = ioutil.TempDir("", r.name)
 }
 
-func (r *temp) createFile(src io.Reader, prefix, file string, mode os.FileMode) (f *os.File, err error) {
+func (r *temp) file(src io.Reader, prefix, file string, mode os.FileMode) (filename string, err error) {
 	r.init()
 	if r.err != nil {
-		return f, r.err
+		return "", r.err
 	}
 	defer func() {
 		log.Printf(
 			"temp: created temp file: %s (%v err)",
-			f.Name(), err,
+			filename, err,
 		)
 	}()
-	filename := path.Join(r.path, prefix, file)
+	filename = path.Join(r.path, prefix, file)
 	if mode&0222 == 0 {
 		filename += ".ro"
 	}
 	r.err = mkdirp(r.path, strings.TrimPrefix(path.Dir(filename), r.path))
 	if r.err != nil {
-		return nil, r.err
+		return "", r.err
 	}
-	f, err = os.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, mode)
+	f, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE|os.O_TRUNC, mode)
 	if err != nil {
 		r.err = err
-		return nil, err
+		return "", err
 	}
-	defer func() {
-		if err != nil {
-			f.Close()
-			os.Remove(filename)
-		}
-	}()
+	defer f.Close()
 
 	_, r.err = io.Copy(f, src)
 	if r.err != nil {
-		return nil, r.err
+		return "", r.err
 	}
 
-	return f, nil
+	return filename, nil
 }
 
 var enc = base32.HexEncoding.WithPadding(base32.NoPadding)
@@ -256,8 +245,6 @@ func (r *Review) Start(ctx context.Context) error {
 		return err
 	}
 	switch r.Mode {
-	case ModeQuick:
-		return r.reviewQuick(ctx, review)
 	case ModeDiff:
 		return r.reviewDiff(ctx, review)
 	case ModeCheckout:
@@ -265,100 +252,6 @@ func (r *Review) Start(ctx context.Context) error {
 	default:
 		return fmt.Errorf("unknown review mode")
 	}
-}
-
-func (r *Review) reviewQuick(ctx context.Context, review vcs.Review) (err error) {
-	files, err := review.ChangedFiles(ctx)
-	if err != nil {
-		return err
-	}
-	xs, err := prompt.SelectMultiple(ctx, "Pick files to review:", files)
-	if err != nil {
-		return err
-	}
-	files = pick(files, xs...)
-
-	tmp := temp{
-		name: "rw",
-	}
-	for _, file := range files {
-		baseSrc, err := review.BaseFile(ctx, file)
-		if err != nil {
-			return err
-		}
-		headSrc, err := review.HeadFile(ctx, file)
-		if err != nil {
-			return err
-		}
-		roBase, err := tmp.createFile(baseSrc, "base", file, 0444)
-		if err != nil {
-			return err
-		}
-		roHead, err := tmp.createFile(headSrc, "head", file, 0444)
-		if err != nil {
-			return err
-		}
-		base := rwioutil.LineSeeker{Source: roBase}
-		//head := rwioutil.LineSeeker{Source: roHead}
-
-		err = diff(ctx, roBase.Name(), roHead.Name(), func(cmd ed.Command) {
-			pos := cmd.Start - 3
-			if pos < 0 {
-				pos = 0
-			}
-			if err := base.SeekLine(pos - 1); err != nil {
-				panic(err)
-			}
-			// TODO: calculate maximum number of digits in line to not use that
-			// ` % 4d` for line formatting.
-			for ; pos != cmd.Start; pos++ {
-				line, err := base.ReadLine()
-				if err != nil {
-					panic(err)
-				}
-				fmt.Fprintf(os.Stdout, "  % 4d %s\n", pos, line)
-			}
-			switch cmd.Mode {
-			case ed.ModeAdd, ed.ModeChange:
-				for {
-					line, err := cmd.Text.ReadBytes('\n')
-					if err != nil {
-						break
-					}
-					color.Fprintf(os.Stdout, color.Green, "+ % 4d %s\n", pos, line)
-				}
-
-			case ed.ModeDelete:
-				for ; pos <= cmd.End; pos++ {
-					line, err := base.ReadLine()
-					if err != nil {
-						panic(err)
-					}
-					color.Fprintf(os.Stdout, color.Red, "- % 4d %s\n", pos, line)
-				}
-			}
-			for ; pos != cmd.End+3; pos++ {
-				line, err := base.ReadLine()
-				if err != nil {
-					break
-				}
-				fmt.Fprintf(os.Stdout, "  % 4d %s\n", pos, line)
-			}
-
-			fmt.Printf("%+v\n", cmd)
-		})
-		if err != nil {
-			return err
-		}
-
-		resp, err := prompt.ReadLine(ctx, color.Sprintf(color.Blue, "What's next [a,b,c,d]? "))
-		if err != nil {
-			return err
-		}
-		fmt.Println(resp)
-	}
-
-	return nil
 }
 
 func (r *Review) reviewCheckout(ctx context.Context, review vcs.Review) (err error) {
@@ -399,7 +292,7 @@ func (r *Review) reviewCheckout(ctx context.Context, review vcs.Review) (err err
 		if err != nil {
 			return err
 		}
-		roBase, err := tmp.createFile(base, "base", file, 0444)
+		roBase, err := tmp.file(base, "base", file, 0444)
 		if err != nil {
 			return err
 		}
@@ -443,7 +336,7 @@ func (r *Review) reviewCheckout(ctx context.Context, review vcs.Review) (err err
 		}
 		cmds = append(cmds,
 			"-c",
-			fmt.Sprintf("tabnew %s", roBase.Name()),
+			fmt.Sprintf("tabnew %s", roBase),
 			"-c",
 			fmt.Sprintf("vert diffsplit %s", file),
 		)
@@ -496,7 +389,7 @@ func (r *Review) reviewDiff(ctx context.Context, review vcs.Review) error {
 		if err != nil {
 			return err
 		}
-		roBase, err := tmp.createFile(baseSrc, "base", file, 0444)
+		roBase, err := tmp.file(baseSrc, "base", file, 0444)
 		if err != nil {
 			return err
 		}
@@ -506,8 +399,8 @@ func (r *Review) reviewDiff(ctx context.Context, review vcs.Review) error {
 			return err
 		}
 		var (
-			roHead *os.File
-			rwHead *os.File
+			roHead string
+			rwHead string
 
 			comments []commentBlock
 		)
@@ -521,14 +414,14 @@ func (r *Review) reviewDiff(ctx context.Context, review vcs.Review) error {
 			if err != nil {
 				return err
 			}
-			roHead, err = tmp.createFile(head, "head", file, 0444)
+			roHead, err = tmp.file(head, "head", file, 0444)
 			if err != nil {
 				return err
 			}
 			if _, err := head.Seek(0, io.SeekStart); err != nil {
 				return err
 			}
-			rwHead, err = tmp.createFile(head, "head", file, 0644)
+			rwHead, err = tmp.file(head, "head", file, 0644)
 			if err != nil {
 				return err
 			}
@@ -537,11 +430,11 @@ func (r *Review) reviewDiff(ctx context.Context, review vcs.Review) error {
 			if err != nil {
 				return err
 			}
-			roHead, err = tmp.createFile(bytes.NewReader(bts), "head", file, 0444)
+			roHead, err = tmp.file(bytes.NewReader(bts), "head", file, 0444)
 			if err != nil {
 				return err
 			}
-			rwHead, err = tmp.createFile(bytes.NewReader(bts), "head", file, 0644)
+			rwHead, err = tmp.file(bytes.NewReader(bts), "head", file, 0644)
 			if err != nil {
 				return err
 			}
@@ -549,8 +442,8 @@ func (r *Review) reviewDiff(ctx context.Context, review vcs.Review) error {
 
 		//err = launch(ctx, "code", "--wait", "--diff", headFileEdit, baseFile)
 		err = r.launchEditor(ctx, reviewInfo{
-			Head: rwHead.Name(),
-			Base: roBase.Name(),
+			Head: rwHead,
+			Base: roBase,
 		})
 		if err != nil {
 			return err
@@ -561,16 +454,14 @@ func (r *Review) reviewDiff(ctx context.Context, review vcs.Review) error {
 		// with same line range. For now its okay, but maybe it might be glued.
 		var edits []ed.Command
 		storeEdit := func(cmd ed.Command) {
-			log.Println("storing edit", cmd.Mode, cmd.Start, cmd.End)
+			log.Println("storing edit", cmd.Start, cmd.End)
 			log.Println(cmd.Text.String())
-			if cmd.Text != nil {
-				var buf bytes.Buffer
-				buf.ReadFrom(cmd.Text)
-				cmd.Text = &buf
-			}
+			var buf bytes.Buffer
+			buf.ReadFrom(cmd.Text)
+			cmd.Text = &buf
 			edits = append(edits, cmd)
 		}
-		err = diff(ctx, roHead.Name(), rwHead.Name(), func(cmd ed.Command) {
+		err = diff(ctx, roHead, rwHead, func(cmd ed.Command) {
 			if comments != nil {
 				applyEdit(comments, cmd, storeEdit)
 			} else {
@@ -656,7 +547,7 @@ func applyEdit(comments []commentBlock, cmd ed.Command, apply func(ed.Command)) 
 		apply(shiftCommand(cmd, -bExtra))
 		return
 	}
-	if cmd.Mode == ed.ModeAdd && cmd.Start == bEnd {
+	if cmd.Mode == ed.Add && cmd.Start == bEnd {
 		// Add mode contains only address *after* which following text must
 		// added. That is, that address may be the last line of the comment
 		// block and its fine.
