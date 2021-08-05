@@ -58,6 +58,7 @@ func (c *Client) Init(ctx context.Context) error {
 			))
 		}
 
+		log.Printf("using token %q", c.Token)
 		ts := oauth2.StaticTokenSource(
 			&oauth2.Token{
 				AccessToken: c.Token,
